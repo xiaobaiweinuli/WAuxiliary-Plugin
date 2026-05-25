@@ -1,3 +1,4 @@
+
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
@@ -301,6 +302,11 @@ void loadRepoConfig() {
             if (idx < 0 || idx >= repoNames.size()) activeRepoId = "default";
         } catch (Throwable e) { activeRepoId = "default"; }
     }
+
+    // ★ 首次启动时自动添加“星霜仓库”
+    if (repoNames.isEmpty()) {
+        addRepo("星霜仓库", "https://github.com/xiaobaiweinuli/WAuxiliary-Plugin-Grouping/blob/main/docs/index.json");
+    }
 }
 
 // ====================== 代理 / 仓库 URL ======================
@@ -408,7 +414,6 @@ void scanInstalledPlugins() {
                 if (!author.isEmpty())
                     installedExact.put(nameLow + "::" + author.toLowerCase(), p);
                 installedWeak.put(nameLow + "::", p);
-                // 保存完整条目供本地 tab 和移除功能使用
                 HashMap entry = new HashMap();
                 entry.put("name",       name);
                 entry.put("author",     author);
@@ -435,18 +440,26 @@ Properties parseInfoProp(String filePath) {
 
 // ====================== 匹配逻辑 ======================
 
+// ★ 修复：精确匹配优先，仅作者为空时才启用弱匹配
 int getMatchStatus(String onlineName, String onlineAuthor, String onlineVersion, String onlineUpdateTime) {
     if (TextUtils.isEmpty(onlineName)) return STATUS_NOT_INSTALLED;
     String nameLow   = onlineName.trim().toLowerCase();
     String authorLow = TextUtils.isEmpty(onlineAuthor) ? "" : onlineAuthor.trim().toLowerCase();
+
     Properties local = null;
-    if (!authorLow.isEmpty()) local = (Properties) installedExact.get(nameLow + "::" + authorLow);
-    if (local == null)        local = (Properties) installedWeak.get(nameLow + "::");
+    if (!authorLow.isEmpty()) {
+        local = (Properties) installedExact.get(nameLow + "::" + authorLow);
+    } else {
+        local = (Properties) installedWeak.get(nameLow + "::");
+    }
+
     if (local == null) return STATUS_NOT_INSTALLED;
+
     String localUpTime  = local.getProperty("updateTime", "").trim();
     String localVersion = local.getProperty("version",    "").trim();
     String onlineUp  = TextUtils.isEmpty(onlineUpdateTime) ? "" : onlineUpdateTime.trim();
     String onlineVer = TextUtils.isEmpty(onlineVersion)    ? "" : onlineVersion.trim();
+
     if (!localUpTime.isEmpty() && !onlineUp.isEmpty()) {
         try {
             if (Long.parseLong(onlineUp) > Long.parseLong(localUpTime)) return STATUS_UPGRADABLE;
@@ -455,6 +468,7 @@ int getMatchStatus(String onlineName, String onlineAuthor, String onlineVersion,
     }
     if (!localVersion.isEmpty() && !onlineVer.isEmpty())
         return localVersion.equals(onlineVer) ? STATUS_UP_TO_DATE : STATUS_UPGRADABLE;
+
     return STATUS_UNKNOWN_VER;
 }
 
@@ -486,7 +500,6 @@ int countInstalled() {
     return count;
 }
 
-// 计算 header 文字，统一入口
 String getHeaderText() {
     if ("local".equals(activeRepoId)) {
         return "本地已安装: " + installedList.size() + " 个插件";
@@ -510,7 +523,6 @@ String repoFingerprint(JSONArray arr) {
     } catch (Throwable e) { return "0:"; }
 }
 
-// 在 installedList 中按名称+作者查找条目，供详情页取 dirPath
 HashMap findInstalledEntry(String nameLow, String authorLow) {
     for (int i = 0; i < installedList.size(); i++) {
         HashMap e = (HashMap) installedList.get(i);
@@ -623,7 +635,6 @@ void navigateBackToList(Activity ctx) {
     if (getMasterContent() != null && gListView != null) {
         fadeSwapContent(gListView);
     } else {
-        // 列表引用已丢失，重建
         if ("local".equals(activeRepoId)) {
             new Thread(new Runnable() {
                 @Override public void run() {
@@ -639,10 +650,8 @@ void navigateBackToList(Activity ctx) {
     }
 }
 
-// 统一刷新：只更新 header + tab 高亮 + 列表内容，不重建外壳
 void refreshListContent(final Activity ctx) {
     if (gListRoot == null || gListView == null) {
-        // 外壳丢失，需完整重建
         if ("local".equals(activeRepoId) || pluginArray != null) showPluginList(ctx);
         return;
     }
@@ -693,7 +702,6 @@ void rebuildRepoTabs(final Activity ctx) {
     refreshTabHighlights(ctx);
 }
 
-// 内部辅助：向 gTabRow 追加一个 tab 按钮
 void addTabToRow(final Activity ctx, String label, final String repoId) {
     Button btn = createTabBtn(ctx, label, repoId.equals(activeRepoId));
     btn.setTag(repoId);
@@ -813,16 +821,13 @@ void switchRepo(final Activity ctx, final String repoId) {
     currentKeyword = "";
     try { if (gSearchBox != null) gSearchBox.setText(""); } catch (Throwable ignore) {}
 
-    // 先刷新 tab 高亮（主线程）
     new Handler(Looper.getMainLooper()).post(new Runnable() {
         @Override public void run() { refreshTabHighlights(ctx); }
     });
 
-    // 本地 tab：扫描目录后直接渲染，无需网络请求
     if ("local".equals(repoId)) {
         new Thread(new Runnable() {
             @Override public void run() {
-                installedCacheDirty = true;
                 ensureInstalledCache();
                 new Handler(Looper.getMainLooper()).post(new Runnable() {
                     @Override public void run() { refreshListContent(ctx); }
@@ -832,9 +837,7 @@ void switchRepo(final Activity ctx, final String repoId) {
         return;
     }
 
-    // 其他仓库：优先加载本地缓存快速渲染，再后台拉取
     if (loadLocalCache(repoId)) {
-        installedCacheDirty = true;
         new Thread(new Runnable() {
             @Override public void run() {
                 ensureInstalledCache();
@@ -864,14 +867,11 @@ void removePlugin(final Activity ctx, final String dirPath,
             new Handler(Looper.getMainLooper()).post(new Runnable() {
                 @Override public void run() {
                     toast("插件已移除");
-                    // 更新 header 计数
                     if (gHeaderView != null) gHeaderView.setText(getHeaderText());
                     if ("local".equals(activeRepoId)) {
-                        // 本地 tab：直接重渲染列表
                         if (gListRoot != null && gListCtx != null)
                             renderLocalCards(gListCtx, gListRoot, currentKeyword);
                     } else {
-                        // 仓库 tab：刷新卡片安装状态，同时更新详情页
                         if (gListRoot != null && gListCtx != null)
                             renderPluginCards(gListCtx, gListRoot, currentKeyword);
                         if (tvStatus  != null) tvStatus.setText("未安装");
@@ -887,7 +887,6 @@ void removePlugin(final Activity ctx, final String dirPath,
 
 void showPluginList(final Activity ctx) {
     try {
-        // 本地 tab 不依赖 pluginArray，其他 tab 要求非空
         if (!"local".equals(activeRepoId) && pluginArray == null) {
             toast("数据为空"); return;
         }
@@ -899,7 +898,7 @@ void showPluginList(final Activity ctx) {
         outerRoot.setBackgroundColor(Color.parseColor(getBgColor(ctx)));
         outerRoot.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
 
-        // ---- Header（代理 + 管理按钮，始终显示）----
+        // Header
         LinearLayout headerRow = new LinearLayout(ctx);
         headerRow.setOrientation(LinearLayout.HORIZONTAL);
         headerRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -928,7 +927,7 @@ void showPluginList(final Activity ctx) {
 
         outerRoot.addView(headerRow);
 
-        // ---- 搜索框 ----
+        // 搜索框
         final EditText searchBox = new EditText(ctx);
         searchBox.setHint("搜索插件名称或作者...");
         searchBox.setSingleLine(true);
@@ -947,14 +946,13 @@ void showPluginList(final Activity ctx) {
         searchLp.topMargin  = dp(ctx, 6);  searchLp.bottomMargin = dp(ctx, 4);
         outerRoot.addView(searchBox, searchLp);
 
-        // ---- Tab 栏（始终渲染，本地 tab 无条件追加在末尾）----
+        // Tab 栏
         HorizontalScrollView tabScroll = new HorizontalScrollView(ctx);
         tabScroll.setHorizontalScrollBarEnabled(false);
         LinearLayout tabRow = new LinearLayout(ctx);
         tabRow.setOrientation(LinearLayout.HORIZONTAL);
         tabRow.setPadding(dp(ctx, 14), dp(ctx, 6), dp(ctx, 14), dp(ctx, 6));
 
-        // 先把 gTabRow 指向新建的 tabRow，再用 addTabToRow 复用逻辑
         gTabRow = tabRow;
         addTabToRow(ctx, "默认官方", "default");
         for (int i = 0; i < repoNames.size(); i++)
@@ -965,7 +963,7 @@ void showPluginList(final Activity ctx) {
         tabScroll.addView(tabRow);
         outerRoot.addView(tabScroll, new LinearLayout.LayoutParams(-1, -2));
 
-        // ---- 列表区 ----
+        // 列表区
         ScrollView scrollView = new ScrollView(ctx);
         final LinearLayout listRoot = new LinearLayout(ctx);
         listRoot.setOrientation(LinearLayout.VERTICAL);
@@ -973,23 +971,19 @@ void showPluginList(final Activity ctx) {
         scrollView.addView(listRoot);
         outerRoot.addView(scrollView, new LinearLayout.LayoutParams(-1, 0, 1f));
 
-        // 写入全局引用
         gListCtx    = ctx;
         gHeaderView = tvHeader;
         gListRoot   = listRoot;
         gListView   = outerRoot;
         gTabScroll  = tabScroll;
         gSearchBox  = searchBox;
-        // gTabRow 已在上面赋值
 
-        // 首次渲染
         if ("local".equals(activeRepoId)) {
             renderLocalCards(ctx, listRoot, currentKeyword);
         } else {
             renderPluginCards(ctx, listRoot, currentKeyword);
         }
 
-        // 搜索监听
         searchBox.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) {}
             @Override public void onTextChanged(CharSequence s, int st, int b, int c) {
@@ -1059,7 +1053,6 @@ void renderLocalCards(final Activity ctx, final LinearLayout listRoot, final Str
         tvSub.setPadding(0, dp(ctx, 5), 0, 0);
         textWrap.addView(tvSub);
 
-        // 目录路径小字，方便区分自编写插件
         String shortPath = dirPath.length() > 42
                 ? "…" + dirPath.substring(dirPath.length() - 40) : dirPath;
         TextView tvPath = new TextView(ctx);
@@ -1074,17 +1067,14 @@ void renderLocalCards(final Activity ctx, final LinearLayout listRoot, final Str
         removeLp.leftMargin = dp(ctx, 10);
         topRow.addView(btnRemove, removeLp);
 
-        // 用 setTag 存索引，彻底避免 BeanShell 匿名类捕获循环变量错误
         btnRemove.setTag(new Integer(i));
         btnRemove.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 int idx = ((Integer) v.getTag()).intValue();
-                // 运行时从 installedList 取最新数据，索引已由 tag 锁定
                 HashMap e = (HashMap) installedList.get(idx);
                 final String eName    = e.get("name").toString();
                 final String eDirPath = e.get("dirPath").toString();
 
-                // 构建与整体风格统一的确认弹窗
                 LinearLayout msgLayout = new LinearLayout(ctx);
                 msgLayout.setOrientation(LinearLayout.VERTICAL);
                 msgLayout.setPadding(dp(ctx, 20), dp(ctx, 16), dp(ctx, 20), dp(ctx, 8));
@@ -1095,7 +1085,6 @@ void renderLocalCards(final Activity ctx, final LinearLayout listRoot, final Str
                 tvMsg.setTextColor(Color.parseColor(getTextColor(ctx)));
                 msgLayout.addView(tvMsg);
 
-                // 路径以小字显示，不撑大弹窗
                 TextView tvPath2 = new TextView(ctx);
                 tvPath2.setText(eDirPath);
                 tvPath2.setTextSize(11);
@@ -1117,7 +1106,6 @@ void renderLocalCards(final Activity ctx, final LinearLayout listRoot, final Str
                         .create();
 
                 confirmDialog.show();
-                // 应用与代理/仓库弹窗相同的圆角+深浅色背景
                 setupDialogStyle(ctx, confirmDialog);
                 styleDialogButtons(ctx, confirmDialog);
             }
@@ -1331,12 +1319,12 @@ void showPluginInfo(final Activity ctx, final JSONObject obj) {
             btnInstall.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     btnInstall.setEnabled(false);
-                    installPlugin(ctx, name, homeLink, tvStatusValue, btnInstall);
+                    // ★ 传入已解析的 author
+                    installPlugin(ctx, name, author, homeLink, tvStatusValue, btnInstall);
                 }
             });
         }
 
-        // 已安装时追加移除按钮（灰色，次要操作）
         if (status != STATUS_NOT_INSTALLED) {
             final HashMap localEntry = findInstalledEntry(
                     name.trim().toLowerCase(), author.trim().toLowerCase());
@@ -1465,7 +1453,7 @@ String readLocalFile(String path) {
 // ====================== 缓存 ======================
 
 boolean loadLocalCache(String repoId) {
-    if ("local".equals(repoId)) return false; // 本地 tab 不走文件缓存
+    if ("local".equals(repoId)) return false;
     if (isLocalRepo(repoId))   return false;
     try {
         File file = new File(getCacheFilePath(repoId));
@@ -1592,7 +1580,134 @@ void finishInstall(final TextView tvStatus, final Button btnInstall, final Strin
     });
 }
 
-void installPlugin(final Activity ctx, final String pluginName,
+// ★ 实际文件下载与复制
+void performFileInstall(final Activity ctx, final List files, final String dirName,
+                        final String parentPath, final String installDir,
+                        final TextView tvStatus, final Button btnInstall, final String pluginName) {
+    try {
+        String tempDir = cacheDir.toString() + "/install_temp/" + dirName;
+        deleteDir(tempDir);
+        new File(tempDir).mkdirs();
+
+        int total = files.size(), downloadFail = 0;
+        for (int i = 0; i < total; i++) {
+            String[] entry = (String[]) files.get(i);
+            updateInstallText(tvStatus, "⏳ 下载 " + (i+1) + "/" + total + "  " + entry[0]);
+            byte[] bytes = downloadFileBytes(entry[1]);
+            if (bytes == null || bytes.length == 0) {
+                downloadFail++;
+                continue;
+            }
+            writeFile(tempDir + "/" + entry[0], bytes);
+        }
+
+        boolean allOk = (downloadFail == 0);
+        if (allOk) {
+            for (int i = 0; i < files.size(); i++) {
+                File f = new File(tempDir + "/" + ((String[]) files.get(i))[0]);
+                if (!f.exists() || f.length() == 0) {
+                    allOk = false;
+                    break;
+                }
+            }
+        }
+
+        if (!allOk) {
+            deleteDir(tempDir);
+            finishInstall(tvStatus, btnInstall, "❌ 下载不完整（" + downloadFail + " 个失败），原插件未变动");
+            return;
+        }
+
+        boolean copyOk = copyDir(tempDir, installDir);
+        deleteDir(tempDir);
+
+        if (!copyOk) {
+            finishInstall(tvStatus, btnInstall, "❌ 文件替换失败，请检查存储权限");
+            return;
+        }
+
+        installedCacheDirty = true;
+        ensureInstalledCache();
+        refreshListUI();
+
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override public void run() {
+                if (btnInstall != null) {
+                    btnInstall.setText("重装");
+                    btnInstall.setEnabled(true);
+                    GradientDrawable bg = new GradientDrawable();
+                    bg.setCornerRadius(dp(ctx, 999));
+                    bg.setColor(Color.parseColor("#E53935"));
+                    btnInstall.setBackground(bg);
+                }
+                tvStatus.setText("✅ 已安装（最新）");
+                toast("「" + pluginName + "」安装完成（共 " + files.size() + " 个文件）");
+            }
+        });
+    } catch (Throwable e) {
+        log("performFileInstall异常=" + e);
+        finishInstall(tvStatus, btnInstall, "❌ 安装出错: " + e.getMessage());
+    }
+}
+
+// ★ 冲突对话框
+void showConflictDialog(final Activity ctx, final String name, final String author,
+                        final String existAuthor,
+                        final List files, final String parentPath, final String installDir,
+                        final TextView tvStatus, final Button btnInstall) {
+    LinearLayout msgLayout = new LinearLayout(ctx);
+    msgLayout.setOrientation(LinearLayout.VERTICAL);
+    msgLayout.setPadding(dp(ctx, 20), dp(ctx, 16), dp(ctx, 20), dp(ctx, 8));
+
+    TextView tvMsg = new TextView(ctx);
+    tvMsg.setText("目录已被「" + name + "（作者：" + existAuthor + "）」占用，\n当前安装作者为「" + author + "」。");
+    tvMsg.setTextSize(14);
+    tvMsg.setTextColor(Color.parseColor(getTextColor(ctx)));
+    msgLayout.addView(tvMsg);
+
+    AlertDialog dialog = new AlertDialog.Builder(ctx)
+        .setTitle("安装冲突")
+        .setView(msgLayout)
+        .setPositiveButton("覆盖（替换原有插件）", new android.content.DialogInterface.OnClickListener() {
+            @Override public void onClick(android.content.DialogInterface d, int w) {
+                deleteDir(installDir);
+                new Thread(new Runnable() {
+                    @Override public void run() {
+                        performFileInstall(ctx, files, name + "_" + author, parentPath, installDir, tvStatus, btnInstall, name);
+                    }
+                }).start();
+            }
+        })
+        .setNeutralButton("保留两者（新建目录）", new android.content.DialogInterface.OnClickListener() {
+            @Override public void onClick(android.content.DialogInterface d, int w) {
+                String newDir = installDir;
+                int counter = 1;
+                while (new File(newDir).exists()) {
+                    newDir = installDir + "_" + counter;
+                    counter++;
+                }
+                final String finalNewDir = newDir;
+                new Thread(new Runnable() {
+                    @Override public void run() {
+                        performFileInstall(ctx, files, name + "_" + author, parentPath, finalNewDir, tvStatus, btnInstall, name);
+                    }
+                }).start();
+            }
+        })
+        .setNegativeButton("取消", new android.content.DialogInterface.OnClickListener() {
+            @Override public void onClick(android.content.DialogInterface d, int w) {
+                finishInstall(tvStatus, btnInstall, "❌ 用户取消安装");
+            }
+        })
+        .create();
+
+    dialog.show();
+    setupDialogStyle(ctx, dialog);
+    styleDialogButtons(ctx, dialog);
+}
+
+// ★ installPlugin（增加 author 参数，内部不再二次查找）
+void installPlugin(final Activity ctx, final String pluginName, final String pluginAuthor,
                    final String homeLink, final TextView tvStatus, final Button btnInstall) {
     final String[] parsed = parseGithubUrl(homeLink);
     if (parsed == null) {
@@ -1601,53 +1716,55 @@ void installPlugin(final Activity ctx, final String pluginName,
         return;
     }
     updateInstallText(tvStatus, "⏳ 准备中...");
+
     new Thread(new Runnable() {
         @Override public void run() {
             List files = new ArrayList();
             collectFiles(parsed[0], parsed[1], parsed[2], parsed[3], "", files);
-            if (files.isEmpty()) { finishInstall(tvStatus, btnInstall, "❌ 未找到可安装的文件"); return; }
-            String safeName = pluginName.replace("/", "_").replace("\\", "_");
-            String tempDir  = cacheDir.toString() + "/install_temp/" + safeName;
-            deleteDir(tempDir); new File(tempDir).mkdirs();
-            int total = files.size(), downloadFail = 0;
-            for (int i = 0; i < total; i++) {
-                String[] entry = (String[]) files.get(i);
-                updateInstallText(tvStatus, "⏳ 下载 " + (i+1) + "/" + total + "  " + entry[0]);
-                byte[] bytes = downloadFileBytes(entry[1]);
-                if (bytes == null || bytes.length == 0) { downloadFail++; continue; }
-                writeFile(tempDir + "/" + entry[0], bytes);
-            }
-            boolean allOk = (downloadFail == 0);
-            if (allOk)
-                for (int i = 0; i < files.size(); i++) {
-                    File f = new File(tempDir + "/" + ((String[]) files.get(i))[0]);
-                    if (!f.exists() || f.length() == 0) { allOk = false; break; }
-                }
-            if (!allOk) {
-                deleteDir(tempDir);
-                finishInstall(tvStatus, btnInstall, "❌ 下载不完整（" + downloadFail + " 个失败），原插件未变动");
+            if (files.isEmpty()) {
+                finishInstall(tvStatus, btnInstall, "❌ 未找到可安装的文件");
                 return;
             }
+
+            String safeName   = pluginName.replace("/", "_").replace("\\", "_");
+            String safeAuthor = pluginAuthor.replace("/", "_").replace("\\", "_").trim();
+            String dirName;
+            if (!TextUtils.isEmpty(safeAuthor)) {
+                dirName = safeName + "_" + safeAuthor;
+            } else {
+                dirName = safeName;
+            }
+
             String parentPath = pluginDir.toString().substring(0, pluginDir.toString().lastIndexOf("/"));
-            String installDir = parentPath + "/" + safeName;
-            boolean copyOk = copyDir(tempDir, installDir);
-            deleteDir(tempDir);
-            if (!copyOk) { finishInstall(tvStatus, btnInstall, "❌ 文件替换失败，请检查存储权限"); return; }
-            installedCacheDirty = true; ensureInstalledCache();
-            refreshListUI();
-            new Handler(Looper.getMainLooper()).post(new Runnable() {
-                @Override public void run() {
-                    if (btnInstall != null) {
-                        btnInstall.setText("重装"); btnInstall.setEnabled(true);
-                        GradientDrawable bg = new GradientDrawable();
-                        bg.setCornerRadius(dp(ctx, 999));
-                        bg.setColor(Color.parseColor("#E53935"));
-                        btnInstall.setBackground(bg);
+            String installDir = parentPath + "/" + dirName;
+            File installDirFile = new File(installDir);
+
+            if (installDirFile.exists() && installDirFile.isDirectory()) {
+                File infoFile = new File(installDirFile, "info.prop");
+                if (infoFile.exists()) {
+                    Properties existing = parseInfoProp(infoFile.getAbsolutePath());
+                    if (existing != null) {
+                        String existAuthor = existing.getProperty("author", "").trim();
+                        if (!TextUtils.isEmpty(safeAuthor) && !safeAuthor.equals(existAuthor)) {
+                            final String finalSafeName  = safeName;
+                            final String finalSafeAuthor = safeAuthor;
+                            final List finalFiles       = files;
+                            final String finalParentPath = parentPath;
+                            final String finalInstallDir = installDir;
+
+                            new Handler(Looper.getMainLooper()).post(new Runnable() {
+                                @Override public void run() {
+                                    showConflictDialog(ctx, finalSafeName, finalSafeAuthor, existAuthor,
+                                        finalFiles, finalParentPath, finalInstallDir, tvStatus, btnInstall);
+                                }
+                            });
+                            return;
+                        }
                     }
-                    tvStatus.setText("✅ 已安装（最新）");
-                    toast("「" + pluginName + "」安装完成（共 " + total + " 个文件）");
                 }
-            });
+            }
+
+            performFileInstall(ctx, files, dirName, parentPath, installDir, tvStatus, btnInstall, pluginName);
         }
     }).start();
 }
@@ -2022,7 +2139,8 @@ void setupDialogStyle(Activity ctx, AlertDialog dialog) {
         android.view.Window w = dialog.getWindow();
         if (w == null) return;
         GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(dp(ctx, 20)); bg.setColor(Color.parseColor(getBgColor(ctx)));
+        bg.setCornerRadius(dp(ctx, 20));
+        bg.setColor(Color.parseColor(getBgColor(ctx)));
         w.setBackgroundDrawable(bg);
         android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
         ctx.getWindowManager().getDefaultDisplay().getMetrics(dm);
